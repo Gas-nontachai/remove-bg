@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 import traceback
 import zipfile
 from pathlib import Path
@@ -44,17 +45,17 @@ def process_single_image_job(
 ) -> dict[str, str]:
     job = get_current_job()
     job_id = job.id if job else "sync"
-    _update_job_meta(progress=5, stage="prepare")
+    _update_job_meta(progress=5, stage="prepare", started_at_ts=int(time.time()))
 
     try:
         options = RemoveBackgroundOptions(feather_radius=feather_radius, alpha_boost=alpha_boost)
         _update_job_meta(progress=30, stage="remove_background")
         output_png = use_case.execute(image_bytes, options)
 
-        key = f"jobs/{job_id}/{_safe_stem(original_name, 'result')}.png"
+        key = f"jobs/single/{job_id}/{_safe_stem(original_name, 'result')}.png"
         _update_job_meta(progress=80, stage="upload")
         storage.put_bytes(key, output_png, "image/png")
-        _update_job_meta(progress=100, stage="done")
+        _update_job_meta(progress=100, stage="done", finished_at_ts=int(time.time()))
     except Exception as exc:  # noqa: BLE001
         _update_job_meta(progress=0, stage="failed", error=str(exc), traceback=traceback.format_exc())
         raise
@@ -75,7 +76,7 @@ def process_batch_images_job(
     job = get_current_job()
     job_id = job.id if job else "sync"
     total = max(1, len(files_payload))
-    _update_job_meta(progress=3, stage="prepare", total=total, current=0)
+    _update_job_meta(progress=3, stage="prepare", total=total, current=0, started_at_ts=int(time.time()))
 
     try:
         options = RemoveBackgroundOptions(feather_radius=feather_radius, alpha_boost=alpha_boost)
@@ -94,10 +95,10 @@ def process_batch_images_job(
                 progress = int((index / total) * 90)
                 _update_job_meta(progress=progress, stage="processing", total=total, current=index)
 
-        key = f"jobs/{job_id}/removed-backgrounds.zip"
+        key = f"jobs/batch/{job_id}/removed-backgrounds.zip"
         _update_job_meta(progress=95, stage="upload")
         storage.put_bytes(key, output_buffer.getvalue(), "application/zip")
-        _update_job_meta(progress=100, stage="done")
+        _update_job_meta(progress=100, stage="done", finished_at_ts=int(time.time()))
     except Exception as exc:  # noqa: BLE001
         _update_job_meta(progress=0, stage="failed", error=str(exc), traceback=traceback.format_exc())
         raise

@@ -4,6 +4,7 @@ import os
 
 
 class Settings:
+    app_profile: str = os.getenv("APP_PROFILE", "dev")
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     s3_endpoint_url: str | None = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
@@ -31,6 +32,10 @@ class Settings:
     cleanup_enabled: bool = os.getenv("CLEANUP_ENABLED", "true").lower() == "true"
     cleanup_interval_seconds: int = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "900"))
     cleanup_older_than_seconds: int = int(os.getenv("CLEANUP_OLDER_THAN_SECONDS", "86400"))
+    cleanup_prefixes: tuple[str, ...] = tuple(
+        x.strip() for x in os.getenv("CLEANUP_PREFIXES", "jobs/single/,jobs/batch/").split(",") if x.strip()
+    )
+    worker_concurrency: int = int(os.getenv("WORKER_CONCURRENCY", "1"))
 
 
 settings = Settings()

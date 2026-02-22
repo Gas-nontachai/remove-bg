@@ -87,3 +87,32 @@ def test_cancel_job(monkeypatch) -> None:
     res = client.post('/api/jobs/job-x/cancel')
     assert res.status_code == 200
     assert res.json()['status'] == 'canceled'
+
+
+def test_prometheus_metrics() -> None:
+    client = TestClient(api.app)
+    res = client.get('/api/metrics/prometheus')
+    assert res.status_code == 200
+    assert 'rmbg_' in res.text
+
+
+def test_retry_failed_job(monkeypatch) -> None:
+    class DummyJob:
+        id = 'job-f'
+        func_name = 'app.tasks.background_jobs.process_single_image_job'
+        args = (b'abc', 'a.png', 0.0, 1.0)
+        kwargs = {}
+
+        def get_status(self, refresh=True):  # noqa: ARG002
+            return 'failed'
+
+    class DummyQueue:
+        def enqueue_call(self, **kwargs):
+            return SimpleNamespace(id='job-new')
+
+    monkeypatch.setattr(api.Job, 'fetch', lambda *args, **kwargs: DummyJob())  # noqa: ARG005
+    monkeypatch.setattr(api, 'queue', DummyQueue())
+    client = TestClient(api.app)
+    res = client.post('/api/jobs/job-f/retry')
+    assert res.status_code == 200
+    assert res.json()['job_id'] == 'job-new'

@@ -1,111 +1,51 @@
 # Background Remover Studio
 
-Production-oriented background-removal web app with editor tools, async job queue, and MinIO storage.
+Production-oriented background-removal web app with editor tools, async queue workers, and MinIO object storage.
 
-## Implemented Scope
+## Current Capability (Auth excluded)
 
-1. Job lifecycle management
-- async jobs with status polling
-- cancel API
-- cleanup jobs (manual + scheduler)
+- Async job lifecycle: submit, poll, cancel, retry failed, cleanup
+- Progress + stage + ETA in job status
+- Worker reliability: retry/backoff + failed job registry endpoint
+- Storage hardening: MinIO/S3 + prefix-based cleanup strategy
+- Validation/security: MIME + Pillow image verify + size/pixel limits + rate limit + request-id
+- Observability: JSON request logs + metrics JSON + Prometheus endpoint
+- Monitoring stack: Prometheus + Grafana (optional compose profile)
+- UI polish: compare slider, keyboard shortcuts, autosave, failed-jobs retry panel
+- Tests: unit + API + task tests, plus dockerized integration smoke in CI
+- Release/deploy artifacts: CI, release workflow, deploy workflow, operations runbook
 
-2. Progress reporting
-- per-job progress/stage metadata
-- frontend progress bars for single/batch
+## Key API Endpoints
 
-3. Worker reliability
-- retry policy with backoff
-- failed jobs listing endpoint
+- `POST /api/jobs/remove-bg`
+- `POST /api/jobs/remove-bg-batch`
+- `GET /api/jobs/{job_id}`
+- `POST /api/jobs/{job_id}/cancel`
+- `POST /api/jobs/{job_id}/retry`
+- `GET /api/jobs/{job_id}/download`
+- `GET /api/failed-jobs`
+- `POST /api/admin/cleanup`
+- `GET /api/metrics`
+- `GET /api/metrics/prometheus`
+- `GET /api/health`
 
-4. Storage hardening
-- MinIO/S3 object storage
-- cleanup of expired outputs
+## Environment Profiles
 
-5. Validation and security
-- MIME + image bytes verification with Pillow
-- max bytes/max pixels limit
-- request rate limit
-- request-id per API call
+- `.env.dev` for local dev defaults
+- `.env.prod.example` as production template
+- `.env` active local file
 
-6. Testing
-- pytest suite for API, task, and validation logic
-
-7. Observability
-- structured request logging
-- in-app metrics endpoint
-
-8. DX / Operations
-- scripts for storage init and cleanup
-- GitHub Actions CI workflow
-
-9. UI/UX polish
-- before/after compare slider
-- keyboard shortcuts
-- autosave editor settings
-
-## Architecture
-
-- `web` (FastAPI): validate input, enqueue jobs, provide status/download APIs
-- `worker` (RQ): execute remove-bg tasks and cleanup tasks
-- `redis`: queue backend
-- `minio`: object storage
-
-## Project Structure
-
-```text
-app/
-  application/
-  domain/
-  infrastructure/
-    image_validation.py
-    jobs.py
-    metrics.py
-    object_storage.py
-  presentation/
-  tasks/
-scripts/
-  init_storage.py
-  run_cleanup.py
-static/
-tests/
-worker.py
-main.py
-```
-
-## Environment
+Recommended:
 
 ```bash
-cp .env.example .env
+cp .env.dev .env
 ```
 
-Main variables:
-- `REDIS_URL`
-- `S3_ENDPOINT_URL`
-- `S3_PUBLIC_ENDPOINT_URL`
-- `S3_ACCESS_KEY`
-- `S3_SECRET_KEY`
-- `S3_BUCKET`
-- `MAX_IMAGE_BYTES`
-- `MAX_BATCH_FILES`
-- `MAX_IMAGE_PIXELS`
-- `JOB_RETRY_MAX`
-- `JOB_RETRY_INTERVALS`
-- `CLEANUP_ENABLED`
-- `CLEANUP_INTERVAL_SECONDS`
-- `CLEANUP_OLDER_THAN_SECONDS`
+For production, create `.env.prod` from `.env.prod.example` and replace all secrets.
 
-## Run (Docker Compose)
+## Run Locally (Python)
 
-```bash
-docker compose up --build
-```
-
-Services:
-- Web: `http://127.0.0.1:8000`
-- MinIO API: `http://127.0.0.1:9000`
-- MinIO Console: `http://127.0.0.1:9001`
-
-## Run (Local)
+Prerequisite: Redis + MinIO running on localhost.
 
 ```bash
 python3 -m venv .venv
@@ -115,41 +55,69 @@ python scripts/init_storage.py
 uvicorn main:app --reload
 ```
 
-Worker terminal:
+In another terminal:
 
 ```bash
 source .venv/bin/activate
 python worker.py
 ```
 
-## API
-
-- `POST /api/jobs/remove-bg`
-- `POST /api/jobs/remove-bg-batch`
-- `GET /api/jobs/{job_id}`
-- `POST /api/jobs/{job_id}/cancel`
-- `GET /api/jobs/{job_id}/download`
-- `GET /api/failed-jobs`
-- `POST /api/admin/cleanup`
-- `GET /api/metrics`
-- `GET /api/health`
-
-## Shortcuts
-
-- `B` brush erase
-- `E` brush restore
-- `W` wand erase
-- `P` polygon erase
-- `Z` undo
-- `Y` redo
-- `Space` hold pan
-
-## Tests
+## Run with Docker Compose
 
 ```bash
-python3 -m pytest -q
+docker compose up --build -d
 ```
 
-## CI
+Optional monitoring stack:
 
-GitHub Actions workflow: `.github/workflows/ci.yml`
+```bash
+docker compose --profile monitoring up -d
+```
+
+Ports:
+- App: `8000`
+- MinIO: `9000` (API), `9001` (console)
+- Prometheus: `9090`
+- Grafana: `3000`
+
+## Performance Tuning
+
+Use env values:
+- `WORKER_CONCURRENCY`
+- `RATE_LIMIT_PER_MINUTE`
+- `MAX_BATCH_FILES`
+- `JOB_RETRY_MAX`, `JOB_RETRY_INTERVALS`
+
+Quick submit benchmark:
+
+```bash
+python scripts/benchmark_jobs.py --count 20
+```
+
+## Testing
+
+Unit/API tests:
+
+```bash
+python -m pytest -q
+```
+
+Integration smoke (requires running stack):
+
+```bash
+./tests/integration_smoke.sh
+```
+
+## CI/CD
+
+- CI: `.github/workflows/ci.yml`
+  - unit tests
+  - docker-compose integration smoke
+- Release tags: `.github/workflows/release.yml` (`v*.*.*`)
+- Manual deploy workflow: `.github/workflows/deploy.yml`
+
+## Operations
+
+Backup/restore and secret rotation guide:
+
+- `docs/operations.md`

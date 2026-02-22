@@ -43,6 +43,8 @@ const batchInput = document.getElementById('batchInput');
 const batchBtn = document.getElementById('batchBtn');
 const batchStatus = document.getElementById('batchStatus');
 const batchProgressBar = document.getElementById('batchProgressBar');
+const refreshFailedBtn = document.getElementById('refreshFailedBtn');
+const failedJobsList = document.getElementById('failedJobsList');
 
 const compareCanvas = document.getElementById('compareCanvas');
 const editCtx = editCanvas.getContext('2d');
@@ -80,6 +82,8 @@ const state = {
   comparePercent: 100,
   spacePanActive: false,
   previousToolBeforeSpace: 'brush-erase',
+  pinchStartDistance: null,
+  pinchStartScale: 1,
 };
 
 const AUTOSAVE_KEY = 'rmbg_studio_settings_v1';
@@ -92,6 +96,14 @@ function setStatus(message) {
 
 function setBatchStatus(message) {
   batchStatus.textContent = message;
+}
+
+function formatEta(seconds) {
+  if (!seconds || seconds <= 0) return '0s';
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
 }
 
 function setSingleProgress(progress) {
@@ -488,6 +500,22 @@ async function getJobStatus(jobId) {
   return response.json();
 }
 
+async function getFailedJobs() {
+  const response = await fetch('/api/failed-jobs?limit=15');
+  if (!response.ok) return [];
+  const payload = await response.json().catch(() => ({ items: [] }));
+  return payload.items || [];
+}
+
+async function retryFailedJob(jobId) {
+  const response = await fetch(`/api/jobs/${jobId}/retry`, { method: 'POST' });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || 'Retry failed');
+  }
+  return response.json();
+}
+
 async function pollJob(jobId, onUpdate) {
   while (true) {
     const status = await getJobStatus(jobId);
@@ -607,7 +635,9 @@ async function processSingleImage() {
   try {
     const { job_id: jobId } = await submitSingleJob(state.selectedFile);
     const status = await pollJob(jobId, (jobState) => {
-      setStatus(`Job: ${jobState.status} (${jobState.stage || 'running'})`);
+      setStatus(
+        `Job: ${jobState.status} (${jobState.stage || 'running'}) ETA ${formatEta(jobState.eta_seconds || 0)}`,
+      );
       setSingleProgress(jobState.progress || 0);
     });
     if (!status.download_path) {
@@ -637,7 +667,9 @@ async function processBatch() {
   try {
     const { job_id: jobId } = await submitBatchJob(files);
     const status = await pollJob(jobId, (jobState) => {
-      setBatchStatus(`Batch: ${jobState.status} (${jobState.stage || 'running'})`);
+      setBatchStatus(
+        `Batch: ${jobState.status} (${jobState.stage || 'running'}) ETA ${formatEta(jobState.eta_seconds || 0)}`,
+      );
       setBatchProgress(jobState.progress || 0);
     });
     if (!status.download_path) {
@@ -658,6 +690,43 @@ async function processBatch() {
   } finally {
     batchBtn.disabled = false;
   }
+}
+
+function renderFailedJobs(items) {
+  failedJobsList.innerHTML = '';
+  if (!items.length) {
+    failedJobsList.innerHTML = '<p class="text-slate-500">No failed jobs</p>';
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between rounded border border-slate-200 p-2';
+    const left = document.createElement('div');
+    left.className = 'min-w-0';
+    left.innerHTML = `<p class="truncate font-medium">${item.filename || item.job_id}</p><p class="text-slate-500 truncate">${item.error || 'failed'}</p>`;
+    const btn = document.createElement('button');
+    btn.className = 'rounded border border-slate-300 px-2 py-1 text-xs';
+    btn.textContent = 'Retry';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const res = await retryFailedJob(item.job_id);
+        setStatus(`Retried ${res.job_id}`);
+      } catch (error) {
+        setStatus(error.message || 'Retry failed');
+      } finally {
+        await refreshFailedJobs();
+      }
+    });
+    row.appendChild(left);
+    row.appendChild(btn);
+    failedJobsList.appendChild(row);
+  });
+}
+
+async function refreshFailedJobs() {
+  const items = await getFailedJobs();
+  renderFailedJobs(items);
 }
 
 imageInput.addEventListener('change', () => {
@@ -714,6 +783,32 @@ canvasViewport.addEventListener('wheel', (event) => {
   if (!state.hasOutput) return;
   event.preventDefault();
   zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+});
+
+canvasViewport.addEventListener(
+  'touchmove',
+  (event) => {
+    if (event.touches.length !== 2) {
+      state.pinchStartDistance = null;
+      return;
+    }
+    event.preventDefault();
+    const [a, b] = event.touches;
+    const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (!state.pinchStartDistance) {
+      state.pinchStartDistance = distance;
+      state.pinchStartScale = state.scale;
+      return;
+    }
+    const ratio = distance / state.pinchStartDistance;
+    state.scale = clampScale(state.pinchStartScale * ratio);
+    updateTransform();
+  },
+  { passive: false },
+);
+
+canvasViewport.addEventListener('touchend', () => {
+  state.pinchStartDistance = null;
 });
 
 editCanvas.addEventListener('pointerdown', (event) => {
@@ -844,6 +939,7 @@ batchInput.addEventListener('change', () => {
 });
 
 batchBtn.addEventListener('click', processBatch);
+refreshFailedBtn.addEventListener('click', refreshFailedJobs);
 
 window.addEventListener('keydown', (event) => {
   if (event.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
@@ -880,3 +976,4 @@ setTool('brush-erase');
 compareSlider.value = String(state.comparePercent);
 updateActionButtons();
 resetView();
+refreshFailedJobs();

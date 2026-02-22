@@ -25,6 +25,9 @@ htmlcov/
 .env
 .env.*
 !.env.example
+!.env.dev
+!.env.ci
+!.env.prod.example
 
 # IDE / Editor
 .vscode/

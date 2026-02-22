@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from rq import Retry
 from rq.job import Job
-from rq.registry import FailedJobRegistry
+from rq.registry import FailedJobRegistry, StartedJobRegistry
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
@@ -142,6 +142,7 @@ def _status_payload(job: Job) -> dict:
         "progress": int(meta.get("progress", 0)),
         "stage": str(meta.get("stage", "queued")),
         "error": None,
+        "eta_seconds": None,
     }
 
     if status == "failed":
@@ -154,6 +155,14 @@ def _status_payload(job: Job) -> dict:
         payload["download_path"] = f"/api/jobs/{job.id}/download"
         payload["progress"] = 100
         payload["stage"] = "done"
+        payload["eta_seconds"] = 0
+    elif status in {"started", "queued"}:
+        started_at = float(meta.get("started_at_ts", 0) or 0)
+        progress = int(payload["progress"] or 0)
+        if started_at > 0 and progress > 0:
+            elapsed = max(1, int(time.time() - started_at))
+            estimated_total = max(elapsed, int((elapsed / progress) * 100))
+            payload["eta_seconds"] = max(0, estimated_total - elapsed)
 
     return payload
 
@@ -168,6 +177,15 @@ def _enqueue_cleanup_job() -> str:
         retry=retry,
     )
     return job.id
+
+
+def _queue_stats() -> tuple[int, int, int]:
+    try:
+        started_registry = StartedJobRegistry(name=queue.name, connection=redis_connection)
+        failed_registry = FailedJobRegistry(name=queue.name, connection=redis_connection)
+        return queue.count, len(started_registry.get_job_ids()), len(failed_registry.get_job_ids())
+    except Exception:  # noqa: BLE001
+        return 0, 0, 0
 
 
 @app.post("/api/jobs/remove-bg")
@@ -259,6 +277,33 @@ def cancel_job(job_id: str) -> dict[str, str]:
     return {"job_id": job.id, "status": "canceled"}
 
 
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str) -> dict[str, str]:
+    try:
+        job = Job.fetch(job_id, connection=redis_connection)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+    if job.get_status(refresh=True) != "failed":
+        raise HTTPException(status_code=409, detail="Only failed jobs can be retried")
+
+    retry = _enqueue_retry()
+    try:
+        requeued = queue.enqueue_call(
+            func=job.func_name,
+            args=job.args,
+            kwargs=job.kwargs,
+            result_ttl=settings.job_result_ttl_seconds,
+            failure_ttl=settings.job_failure_ttl_seconds,
+            retry=retry,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="Failed to requeue job") from exc
+
+    metrics.incr("jobs_retried_total")
+    return {"job_id": requeued.id, "status": "queued"}
+
+
 @app.get("/api/failed-jobs")
 def list_failed_jobs(limit: int = 20) -> dict:
     registry = FailedJobRegistry(name=queue.name, connection=redis_connection)
@@ -317,10 +362,23 @@ def run_cleanup() -> dict[str, str]:
 
 
 @app.get("/api/metrics")
-def get_metrics() -> dict[str, int]:
+def get_metrics() -> dict:
+    queue_depth, queue_started, queue_failed = _queue_stats()
     snapshot = metrics.snapshot()
+    metrics.set_gauge("queue_depth", queue_depth)
+    metrics.set_gauge("queue_started", queue_started)
+    metrics.set_gauge("queue_failed", queue_failed)
     snapshot["timestamp"] = int(datetime.now(timezone.utc).timestamp())
     return snapshot
+
+
+@app.get("/api/metrics/prometheus")
+def get_prometheus_metrics() -> PlainTextResponse:
+    queue_depth, queue_started, queue_failed = _queue_stats()
+    metrics.set_gauge("queue_depth", queue_depth)
+    metrics.set_gauge("queue_started", queue_started)
+    metrics.set_gauge("queue_failed", queue_failed)
+    return PlainTextResponse(metrics.to_prometheus_text(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/api/health")

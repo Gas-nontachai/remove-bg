@@ -1,0 +1,20 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment
+        required: true
+        default: production
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy stack
+        run: |
+          docker compose --env-file .env.prod up -d --build
+      - name: Verify health
+        run: curl -fsS http://127.0.0.1:8000/api/health

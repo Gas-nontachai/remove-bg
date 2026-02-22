@@ -19,7 +19,7 @@ def validate_image_bytes(image_bytes: bytes, max_pixels: int) -> tuple[int, int,
         with Image.open(io.BytesIO(image_bytes)) as image:
             width, height = image.size
             fmt = (image.format or "").upper() or "UNKNOWN"
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
         raise ImageValidationError("Invalid or corrupted image file") from exc
 
     if width <= 0 or height <= 0:

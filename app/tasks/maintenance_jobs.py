@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+from app.config import settings
 from app.infrastructure.object_storage import S3ObjectStorage
 
 
@@ -16,14 +17,19 @@ def cleanup_expired_outputs_job(older_than_seconds: int) -> dict[str, int]:
     now = int(time.time())
     deleted = 0
     scanned = 0
+    by_prefix: dict[str, int] = {}
 
-    for item in storage.iter_job_objects(prefix="jobs/"):
-        scanned += 1
-        modified_ts = int(item["last_modified"].timestamp())
-        age_seconds = now - modified_ts
-        if age_seconds < older_than_seconds:
-            continue
-        storage.delete_object(item["key"])
-        deleted += 1
+    for prefix in settings.cleanup_prefixes:
+        prefix_deleted = 0
+        for item in storage.iter_job_objects(prefix=prefix):
+            scanned += 1
+            modified_ts = int(item["last_modified"].timestamp())
+            age_seconds = now - modified_ts
+            if age_seconds < older_than_seconds:
+                continue
+            storage.delete_object(item["key"])
+            deleted += 1
+            prefix_deleted += 1
+        by_prefix[prefix] = prefix_deleted
 
-    return {"scanned": scanned, "deleted": deleted}
+    return {"scanned": scanned, "deleted": deleted, "prefixes": by_prefix}
