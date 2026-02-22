@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Remove Background</title>
+    <title>Background Remover Studio</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       .checkerboard {
@@ -16,61 +16,156 @@
         background-size: 20px 20px;
         background-position: 0 0, 0 10px, 10px -10px, -10px 0;
       }
+
+      .tool-btn[data-active="true"] {
+        border-color: #0f172a;
+        background: #e2e8f0;
+      }
     </style>
   </head>
   <body class="min-h-screen bg-slate-100 text-slate-900">
-    <main class="mx-auto flex min-h-screen w-full max-w-4xl flex-col px-4 py-10">
-      <header class="mb-10">
-        <h1 class="text-3xl font-bold tracking-tight">Background Remover</h1>
-        <p class="mt-2 text-slate-600">Upload an image and get a transparent PNG.</p>
+    <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 px-4 py-8">
+      <header>
+        <h1 class="text-3xl font-bold tracking-tight">Background Remover Studio</h1>
+        <p class="mt-2 text-slate-600">Auto remove, refine edges, manually erase/restore, then export or batch process.</p>
       </header>
 
-      <section class="grid gap-6 md:grid-cols-2">
-        <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <label
-            for="imageInput"
-            class="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-4 py-12 text-center transition hover:border-slate-500"
-          >
-            <span class="text-sm font-medium text-slate-700">Click to upload</span>
-            <span class="mt-1 text-xs text-slate-500">PNG, JPG, WEBP</span>
-          </label>
-          <input id="imageInput" type="file" accept="image/*" class="hidden" />
-
-          <div class="mt-4 flex items-center gap-3">
-            <button
-              id="processBtn"
-              class="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-              disabled
-            >
-              Remove Background
-            </button>
-            <span id="statusText" class="text-sm text-slate-600"></span>
-          </div>
+      <section class="grid gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm lg:grid-cols-4">
+        <div class="lg:col-span-2">
+          <label for="imageInput" class="mb-2 block text-sm font-semibold text-slate-700">Single image</label>
+          <input id="imageInput" type="file" accept="image/*" class="block w-full rounded-md border border-slate-300 bg-white p-2 text-sm" />
+        </div>
+        <div>
+          <label for="featherInput" class="mb-2 block text-sm font-semibold text-slate-700">Feather (edge)</label>
+          <input id="featherInput" type="range" min="0" max="8" step="0.2" value="0" class="w-full" />
+          <p id="featherValue" class="text-xs text-slate-500">0.0</p>
+        </div>
+        <div>
+          <label for="alphaBoostInput" class="mb-2 block text-sm font-semibold text-slate-700">Alpha boost</label>
+          <input id="alphaBoostInput" type="range" min="0.4" max="2.5" step="0.1" value="1" class="w-full" />
+          <p id="alphaBoostValue" class="text-xs text-slate-500">1.0</p>
         </div>
 
-        <div class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 class="mb-3 text-sm font-semibold text-slate-700">Preview</h2>
-          <div class="grid gap-4">
-            <div>
-              <p class="mb-2 text-xs text-slate-500">Original</p>
-              <img id="inputPreview" class="hidden max-h-56 w-full rounded border border-slate-200 object-contain" alt="Original preview" />
+        <div class="flex flex-wrap items-center gap-2 lg:col-span-4">
+          <button id="processBtn" class="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled>
+            Remove Background
+          </button>
+          <button id="reprocessBtn" class="rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled>
+            Reprocess with Refinement
+          </button>
+          <button id="undoBtn" class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium" disabled>Undo</button>
+          <button id="redoBtn" class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium" disabled>Redo</button>
+          <button id="resetEditsBtn" class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium" disabled>Reset Edits</button>
+          <span id="statusText" class="text-sm text-slate-600"></span>
+        </div>
+      </section>
+
+      <section class="grid gap-6 xl:grid-cols-[320px_1fr]">
+        <aside class="space-y-4">
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <h2 class="text-sm font-semibold text-slate-700">Tools</h2>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="brush-erase">Brush Erase</button>
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="brush-restore">Brush Restore</button>
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="wand-erase">Wand Erase</button>
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="wand-restore">Wand Restore</button>
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="polygon-erase">Polygon Erase</button>
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="polygon-restore">Polygon Restore</button>
+              <button class="tool-btn rounded-md border border-slate-300 px-2 py-2 text-xs" data-tool="pan">Pan</button>
             </div>
-            <div>
-              <p class="mb-2 text-xs text-slate-500">Result</p>
-              <div id="outputPreviewWrap" class="checkerboard hidden rounded border border-slate-200 p-2">
-                <img id="outputPreview" class="max-h-56 w-full rounded object-contain" alt="Output preview" />
+
+            <div class="mt-4">
+              <label for="brushSizeInput" class="mb-1 block text-xs font-semibold text-slate-700">Brush Size</label>
+              <input id="brushSizeInput" type="range" min="4" max="120" step="1" value="28" class="w-full" />
+              <p id="brushSizeValue" class="text-xs text-slate-500">28 px</p>
+            </div>
+            <div class="mt-3">
+              <label for="wandToleranceInput" class="mb-1 block text-xs font-semibold text-slate-700">Wand Tolerance</label>
+              <input id="wandToleranceInput" type="range" min="5" max="120" step="1" value="30" class="w-full" />
+              <p id="wandToleranceValue" class="text-xs text-slate-500">30</p>
+            </div>
+
+            <div class="mt-3 flex gap-2">
+              <button id="closePolygonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs" disabled>Close Polygon</button>
+              <button id="clearPolygonBtn" class="rounded-md border border-slate-300 px-3 py-2 text-xs" disabled>Clear Points</button>
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <h2 class="text-sm font-semibold text-slate-700">Composer</h2>
+            <div class="mt-3 space-y-3">
+              <div>
+                <label for="bgMode" class="mb-1 block text-xs font-semibold text-slate-700">Background Type</label>
+                <select id="bgMode" class="w-full rounded-md border border-slate-300 p-2 text-sm">
+                  <option value="transparent">Transparent</option>
+                  <option value="color">Solid Color</option>
+                  <option value="gradient">Gradient</option>
+                  <option value="image">Image</option>
+                </select>
               </div>
-              <p id="transparentHint" class="mt-2 hidden text-xs text-slate-500">Checkerboard means transparent background.</p>
-              <a
-                id="downloadBtn"
-                class="mt-3 inline-block rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 hidden"
-                download="removed-background.png"
-              >
-                Download PNG
-              </a>
+
+              <div id="colorControls" class="hidden">
+                <label for="bgColor" class="mb-1 block text-xs font-semibold text-slate-700">Color</label>
+                <input id="bgColor" type="color" value="#ffffff" class="h-10 w-full rounded-md border border-slate-300" />
+              </div>
+
+              <div id="gradientControls" class="hidden grid gap-2">
+                <div>
+                  <label for="gradientA" class="mb-1 block text-xs font-semibold text-slate-700">Gradient A</label>
+                  <input id="gradientA" type="color" value="#ffffff" class="h-10 w-full rounded-md border border-slate-300" />
+                </div>
+                <div>
+                  <label for="gradientB" class="mb-1 block text-xs font-semibold text-slate-700">Gradient B</label>
+                  <input id="gradientB" type="color" value="#cbd5e1" class="h-10 w-full rounded-md border border-slate-300" />
+                </div>
+              </div>
+
+              <div id="imageControls" class="hidden">
+                <label for="bgImageInput" class="mb-1 block text-xs font-semibold text-slate-700">Background image</label>
+                <input id="bgImageInput" type="file" accept="image/*" class="block w-full rounded-md border border-slate-300 bg-white p-2 text-sm" />
+              </div>
+
+              <div class="flex gap-2">
+                <button id="downloadPngBtn" class="rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700" disabled>
+                  Download PNG
+                </button>
+                <button id="downloadJpgBtn" class="rounded-md bg-amber-600 px-3 py-2 text-xs font-medium text-white hover:bg-amber-700" disabled>
+                  Download JPG
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+
+          <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <h2 class="text-sm font-semibold text-slate-700">Batch</h2>
+            <p class="mt-1 text-xs text-slate-500">Up to 15 files, download as ZIP.</p>
+            <input id="batchInput" type="file" accept="image/*" multiple class="mt-3 block w-full rounded-md border border-slate-300 bg-white p-2 text-sm" />
+            <button id="batchBtn" class="mt-3 w-full rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled>
+              Process Batch
+            </button>
+            <p id="batchStatus" class="mt-2 text-xs text-slate-600"></p>
+          </div>
+        </aside>
+
+        <section class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p class="text-sm font-semibold text-slate-700">Editor</p>
+            <div class="flex items-center gap-2">
+              <button id="zoomOutBtn" class="rounded-md border border-slate-300 px-3 py-1 text-xs">-</button>
+              <span id="zoomLabel" class="w-14 text-center text-xs text-slate-600">100%</span>
+              <button id="zoomInBtn" class="rounded-md border border-slate-300 px-3 py-1 text-xs">+</button>
+              <button id="resetViewBtn" class="rounded-md border border-slate-300 px-3 py-1 text-xs">Reset View</button>
+            </div>
+          </div>
+
+          <div id="canvasViewport" class="checkerboard relative h-[68vh] overflow-hidden rounded-lg border border-slate-200">
+            <div id="canvasTransform" class="absolute left-0 top-0 origin-top-left" style="transform: translate(0px, 0px) scale(1)">
+              <canvas id="editCanvas" class="absolute left-0 top-0"></canvas>
+              <canvas id="overlayCanvas" class="pointer-events-none absolute left-0 top-0"></canvas>
+            </div>
+          </div>
+          <p class="mt-2 text-xs text-slate-500">Checkerboard means transparent pixels. Use polygon: click points, then "Close Polygon".</p>
+        </section>
       </section>
     </main>
 
