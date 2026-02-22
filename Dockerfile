@@ -16,6 +16,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY app ./app
 COPY static ./static
 COPY main.py ./main.py
+COPY worker.py ./worker.py
 
 RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser

@@ -1,86 +1,104 @@
 # Background Remover Studio
 
-Clean architecture web app using:
-- Python (FastAPI)
-- `rembg` for AI background removal
-- Vanilla JavaScript + Tailwind CSS
+Web app for AI background removal with manual editing tools.
 
-## Features
+## What is implemented now
 
-1. Manual erase/restore tools (brush)
-2. Selection tools (magic wand + polygon select)
-3. Edge refinement (feather + alpha boost)
-4. Background composer (transparent / color / gradient / image)
-5. Batch processing to ZIP
-6. Reliability basics (model session caching, request size limits, rate limit, controlled concurrency)
+- Queue + worker processing with Redis + RQ
+- MinIO (S3-compatible) object storage for output files
+- Job-based API flow: submit -> poll -> download
+- Editor tools: brush erase/restore, wand, polygon, undo/redo, zoom/pan
+- Edge refinement controls: feather + alpha boost
+- Background composer and export
+- Batch processing to ZIP
+
+## Architecture
+
+- `web` (FastAPI): validates uploads, enqueues jobs, exposes status/download API
+- `worker` (RQ): runs remove-bg processing and uploads results to MinIO
+- `redis`: queue backend
+- `minio`: object storage backend
 
 ## Project Structure
 
 ```text
 app/
-  domain/          # Core abstractions
-  application/     # Use cases + edge refinement
-  infrastructure/  # rembg implementation
-  presentation/    # API layer
+  application/
+  domain/
+  infrastructure/
+    jobs.py
+    object_storage.py
+  presentation/
+  tasks/
 static/
-  index.html       # UI
-  app.js           # Editor + tool logic
-app.py             # Vercel + ASGI entry point
-main.py            # Local ASGI entry point
-Dockerfile
-vercel.json
+worker.py
+main.py
 ```
 
-## Run Locally
+## Environment
+
+Copy `.env.example` and adjust values:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --reload
+cp .env.example .env
 ```
 
-Open: http://127.0.0.1:8000
+Important vars:
+- `REDIS_URL`
+- `S3_ENDPOINT_URL`
+- `S3_PUBLIC_ENDPOINT_URL`
+- `S3_ACCESS_KEY`
+- `S3_SECRET_KEY`
+- `S3_BUCKET`
+- `SIGNED_URL_TTL_SECONDS`
 
-## Deploy to Vercel
-
-```bash
-npm i -g vercel
-vercel
-vercel --prod
-```
-
-Configured with:
-- `app.py` as entrypoint
-- `vercel.json` function settings
-- static assets included from `static/**`
-
-## Run With Docker
-
-```bash
-docker build -t rmbg-web .
-docker run --rm -p 8000:8000 rmbg-web
-```
-
-or
+## Run with Docker Compose (recommended)
 
 ```bash
 docker compose up --build
 ```
 
-## API
+Services:
+- Web: `http://127.0.0.1:8000`
+- MinIO API: `http://127.0.0.1:9000`
+- MinIO Console: `http://127.0.0.1:9001`
 
-- `POST /api/remove-bg`
-  - form-data: `file`
-  - returns raw PNG bytes
+## Run locally (without Docker)
 
-- `POST /api/remove-bg-refined`
-  - form-data: `file`, `feather_radius` (0-8), `alpha_boost` (0.4-2.5)
-  - returns raw PNG bytes
+Start Redis + MinIO first, then:
 
-- `POST /api/remove-bg-batch`
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+In another terminal:
+
+```bash
+source .venv/bin/activate
+python worker.py
+```
+
+## API (job-based)
+
+- `POST /api/jobs/remove-bg`
+  - form-data: `file`, `feather_radius`, `alpha_boost`
+  - returns: `{ job_id, status }`
+
+- `POST /api/jobs/remove-bg-batch`
   - form-data: `files[]`, `feather_radius`, `alpha_boost`
-  - returns ZIP (`removed-backgrounds.zip`)
+  - returns: `{ job_id, status }`
+
+- `GET /api/jobs/{job_id}`
+  - returns job state (`queued`, `started`, `finished`, `failed`) and download path when done
+
+- `GET /api/jobs/{job_id}/download`
+  - streams file from MinIO via web API
 
 - `GET /api/health`
-  - returns service status
+
+## Notes
+
+- `Auth + Quota` is intentionally not included yet.

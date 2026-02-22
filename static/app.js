@@ -375,22 +375,75 @@ function drawOverlay() {
   }
 }
 
-async function removeBackground(file) {
+async function submitSingleJob(file) {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('feather_radius', featherInput.value);
   formData.append('alpha_boost', alphaBoostInput.value);
 
-  const response = await fetch('/api/remove-bg-refined', {
+  const response = await fetch('/api/jobs/remove-bg', {
     method: 'POST',
     body: formData,
   });
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || 'Failed to process image');
+    throw new Error(payload.detail || 'Failed to submit job');
   }
 
+  return response.json();
+}
+
+async function submitBatchJob(files) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append('files', file));
+  formData.append('feather_radius', featherInput.value);
+  formData.append('alpha_boost', alphaBoostInput.value);
+
+  const response = await fetch('/api/jobs/remove-bg-batch', {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || 'Failed to submit batch job');
+  }
+
+  return response.json();
+}
+
+async function getJobStatus(jobId) {
+  const response = await fetch(`/api/jobs/${jobId}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || 'Failed to get job status');
+  }
+  return response.json();
+}
+
+async function pollJob(jobId, onUpdate) {
+  while (true) {
+    const status = await getJobStatus(jobId);
+    if (onUpdate) onUpdate(status.status);
+    if (status.status === 'finished') {
+      return status;
+    }
+    if (status.status === 'failed') {
+      throw new Error(status.error || 'Job failed');
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1100);
+    });
+  }
+}
+
+async function downloadJobBlob(jobId) {
+  const response = await fetch(`/api/jobs/${jobId}/download`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || 'Failed to download result');
+  }
   return response.blob();
 }
 
@@ -481,10 +534,17 @@ async function processSingleImage() {
 
   processBtn.disabled = true;
   reprocessBtn.disabled = true;
-  setStatus('Processing...');
+  setStatus('Submitting job...');
 
   try {
-    const blob = await removeBackground(state.selectedFile);
+    const { job_id: jobId } = await submitSingleJob(state.selectedFile);
+    const status = await pollJob(jobId, (phase) => {
+      setStatus(`Job: ${phase}`);
+    });
+    if (!status.download_path) {
+      throw new Error('Result is missing download path');
+    }
+    const blob = await downloadJobBlob(jobId);
     await loadProcessedImage(blob);
     setStatus('Done');
   } catch (error) {
@@ -501,29 +561,21 @@ async function processBatch() {
   if (!files.length) return;
 
   batchBtn.disabled = true;
-  setBatchStatus('Processing batch...');
-
-  const formData = new FormData();
-  files.forEach((file) => formData.append('files', file));
-  formData.append('feather_radius', featherInput.value);
-  formData.append('alpha_boost', alphaBoostInput.value);
+  setBatchStatus('Submitting batch job...');
 
   try {
-    const response = await fetch('/api/remove-bg-batch', {
-      method: 'POST',
-      body: formData,
+    const { job_id: jobId } = await submitBatchJob(files);
+    const status = await pollJob(jobId, (phase) => {
+      setBatchStatus(`Batch: ${phase}`);
     });
-
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.detail || 'Batch request failed');
+    if (!status.download_path) {
+      throw new Error('Batch result is missing download path');
     }
-
-    const zipBlob = await response.blob();
+    const zipBlob = await downloadJobBlob(jobId);
     const url = URL.createObjectURL(zipBlob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'removed-backgrounds.zip';
+    link.download = status.filename || 'removed-backgrounds.zip';
     link.click();
     URL.revokeObjectURL(url);
 

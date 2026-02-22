@@ -1,28 +1,24 @@
 from __future__ import annotations
 
-import asyncio
-import io
 import time
-import zipfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from rq.job import Job
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.application.remove_background_use_case import (
-    RemoveBackgroundOptions,
-    RemoveBackgroundUseCase,
-)
-from app.infrastructure.rembg_background_remover import RembgBackgroundRemover
+from app.infrastructure.jobs import get_queue, get_redis_connection
+from app.infrastructure.object_storage import S3ObjectStorage
 
 app = FastAPI(title="Background Remover")
 
-use_case = RemoveBackgroundUseCase(RembgBackgroundRemover())
-inference_semaphore = asyncio.Semaphore(2)
+queue = get_queue()
+redis_connection = get_redis_connection()
+storage = S3ObjectStorage()
+storage.ensure_bucket()
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_BATCH_FILES = 15
@@ -65,12 +61,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RateLimitMiddleware)
 
 
-def _build_options(feather_radius: float, alpha_boost: float) -> RemoveBackgroundOptions:
+def _validate_options(feather_radius: float, alpha_boost: float) -> tuple[float, float]:
     if feather_radius < 0 or feather_radius > 8:
         raise HTTPException(status_code=400, detail="feather_radius must be between 0 and 8")
     if alpha_boost < 0.4 or alpha_boost > 2.5:
         raise HTTPException(status_code=400, detail="alpha_boost must be between 0.4 and 2.5")
-    return RemoveBackgroundOptions(feather_radius=feather_radius, alpha_boost=alpha_boost)
+    return feather_radius, alpha_boost
 
 
 def _ensure_image_file(file: UploadFile) -> None:
@@ -78,91 +74,125 @@ def _ensure_image_file(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail=f"{file.filename or 'file'} is not an image")
 
 
-def _safe_output_name(file: UploadFile, index: int) -> str:
-    stem = Path(file.filename or f"image-{index}").stem
-    safe = "".join(ch for ch in stem if ch.isalnum() or ch in ("-", "_")) or f"image-{index}"
-    return f"{safe}.png"
+def _status_payload(job: Job) -> dict[str, str | None]:
+    status = job.get_status(refresh=True)
+    payload: dict[str, str | None] = {
+        "job_id": job.id,
+        "status": status,
+        "download_path": None,
+        "filename": None,
+    }
+
+    if status == "failed":
+        payload["error"] = "Job failed"
+
+    if status == "finished":
+        result = job.result or {}
+        filename = result.get("filename") if isinstance(result, dict) else None
+        payload["filename"] = filename
+        payload["download_path"] = f"/api/jobs/{job.id}/download"
+
+    return payload
 
 
-@app.post("/api/remove-bg")
-async def remove_bg(file: UploadFile = File(...)) -> Response:
-    _ensure_image_file(file)
-    image_bytes = await file.read()
-    if len(image_bytes) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="File too large. Max size is 12 MB")
-    options = _build_options(feather_radius=0.0, alpha_boost=1.0)
-
-    try:
-        async with inference_semaphore:
-            output_png = await asyncio.to_thread(use_case.execute, image_bytes, options)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="Background removal failed") from exc
-
-    return Response(content=output_png, media_type="image/png")
-
-
-@app.post("/api/remove-bg-refined")
-async def remove_bg_refined(
+@app.post("/api/jobs/remove-bg")
+async def enqueue_remove_bg(
     file: UploadFile = File(...),
     feather_radius: float = Form(0.0),
     alpha_boost: float = Form(1.0),
-) -> Response:
+) -> dict[str, str]:
     _ensure_image_file(file)
+    feather_radius, alpha_boost = _validate_options(feather_radius, alpha_boost)
     image_bytes = await file.read()
     if len(image_bytes) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="File too large. Max size is 12 MB")
-    options = _build_options(feather_radius=feather_radius, alpha_boost=alpha_boost)
 
-    try:
-        async with inference_semaphore:
-            output_png = await asyncio.to_thread(use_case.execute, image_bytes, options)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="Background removal failed") from exc
+    job = queue.enqueue(
+        "app.tasks.background_jobs.process_single_image_job",
+        image_bytes,
+        file.filename or "image.png",
+        feather_radius,
+        alpha_boost,
+        result_ttl=86400,
+        failure_ttl=86400,
+    )
 
-    return Response(content=output_png, media_type="image/png")
+    return {"job_id": job.id, "status": "queued"}
 
 
-@app.post("/api/remove-bg-batch")
-async def remove_bg_batch(
+@app.post("/api/jobs/remove-bg-batch")
+async def enqueue_remove_bg_batch(
     files: list[UploadFile] = File(...),
     feather_radius: float = Form(0.0),
     alpha_boost: float = Form(1.0),
-) -> Response:
+) -> dict[str, str]:
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(status_code=400, detail=f"Max {MAX_BATCH_FILES} files per batch")
 
-    options = _build_options(feather_radius=feather_radius, alpha_boost=alpha_boost)
-    output_buffer = io.BytesIO()
+    feather_radius, alpha_boost = _validate_options(feather_radius, alpha_boost)
+
+    payload: list[dict[str, bytes | str]] = []
+    for index, file in enumerate(files, start=1):
+        _ensure_image_file(file)
+        image_bytes = await file.read()
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{file.filename or f'file-{index}'} is larger than 12 MB",
+            )
+        payload.append({"name": file.filename or f"file-{index}.png", "bytes": image_bytes})
+
+    job = queue.enqueue(
+        "app.tasks.background_jobs.process_batch_images_job",
+        payload,
+        feather_radius,
+        alpha_boost,
+        result_ttl=86400,
+        failure_ttl=86400,
+    )
+
+    return {"job_id": job.id, "status": "queued"}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_status(job_id: str) -> dict[str, str | None]:
+    try:
+        job = Job.fetch(job_id, connection=redis_connection)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+    return _status_payload(job)
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download_job_result(job_id: str) -> Response:
+    try:
+        job = Job.fetch(job_id, connection=redis_connection)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+
+    if job.get_status(refresh=True) != "finished":
+        raise HTTPException(status_code=409, detail="Job is not finished")
+
+    result = job.result or {}
+    if not isinstance(result, dict) or "key" not in result:
+        raise HTTPException(status_code=500, detail="Job result key not found")
+
+    key = result["key"]
+    filename = str(result.get("filename") or "result.bin")
+    content_type = str(result.get("content_type") or "application/octet-stream")
 
     try:
-        with zipfile.ZipFile(output_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for index, file in enumerate(files, start=1):
-                _ensure_image_file(file)
-                image_bytes = await file.read()
-                if len(image_bytes) > MAX_IMAGE_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"{file.filename or f'file-{index}'} is larger than 12 MB",
-                    )
-
-                async with inference_semaphore:
-                    output_png = await asyncio.to_thread(use_case.execute, image_bytes, options)
-                archive.writestr(_safe_output_name(file, index), output_png)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="Batch background removal failed") from exc
+        data = storage.get_bytes(key)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to read result from storage") from exc
 
     return Response(
-        content=output_buffer.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="removed-backgrounds.zip"'},
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

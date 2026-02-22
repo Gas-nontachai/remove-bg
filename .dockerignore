@@ -7,3 +7,4 @@ __pycache__
 .gitignore
 .DS_Store
 *.log
+.env
