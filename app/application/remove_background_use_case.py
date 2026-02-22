@@ -8,7 +8,7 @@ from PIL import Image, ImageFilter
 from app.domain.background_remover import BackgroundRemover
 
 
-@dataclass(slots=True)
+@dataclass
 class RemoveBackgroundOptions:
     feather_radius: float = 0.0
     alpha_boost: float = 1.0

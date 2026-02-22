@@ -9,6 +9,7 @@ const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
 const resetEditsBtn = document.getElementById('resetEditsBtn');
 const statusText = document.getElementById('statusText');
+const singleProgressBar = document.getElementById('singleProgressBar');
 const closePolygonBtn = document.getElementById('closePolygonBtn');
 const clearPolygonBtn = document.getElementById('clearPolygonBtn');
 
@@ -41,14 +42,18 @@ const downloadJpgBtn = document.getElementById('downloadJpgBtn');
 const batchInput = document.getElementById('batchInput');
 const batchBtn = document.getElementById('batchBtn');
 const batchStatus = document.getElementById('batchStatus');
+const batchProgressBar = document.getElementById('batchProgressBar');
 
+const compareCanvas = document.getElementById('compareCanvas');
 const editCtx = editCanvas.getContext('2d');
 const overlayCtx = overlayCanvas.getContext('2d');
+const compareCtx = compareCanvas.getContext('2d');
 
 const originalCanvas = document.createElement('canvas');
 const originalCtx = originalCanvas.getContext('2d');
 const composeCanvas = document.createElement('canvas');
 const composeCtx = composeCanvas.getContext('2d');
+const compareSlider = document.getElementById('compareSlider');
 
 const state = {
   selectedFile: null,
@@ -72,7 +77,12 @@ const state = {
   panX: 0,
   panY: 0,
   hasOutput: false,
+  comparePercent: 100,
+  spacePanActive: false,
+  previousToolBeforeSpace: 'brush-erase',
 };
+
+const AUTOSAVE_KEY = 'rmbg_studio_settings_v1';
 
 editCanvas.style.touchAction = 'none';
 
@@ -84,11 +94,53 @@ function setBatchStatus(message) {
   batchStatus.textContent = message;
 }
 
+function setSingleProgress(progress) {
+  singleProgressBar.style.width = `${Math.max(0, Math.min(100, Number(progress) || 0))}%`;
+}
+
+function setBatchProgress(progress) {
+  batchProgressBar.style.width = `${Math.max(0, Math.min(100, Number(progress) || 0))}%`;
+}
+
 function updateSliderLabels() {
   featherValue.textContent = Number(featherInput.value).toFixed(1);
   alphaBoostValue.textContent = Number(alphaBoostInput.value).toFixed(1);
   brushSizeValue.textContent = `${state.brushSize} px`;
   wandToleranceValue.textContent = String(state.wandTolerance);
+}
+
+function saveUiSettings() {
+  const payload = {
+    feather: featherInput.value,
+    alphaBoost: alphaBoostInput.value,
+    brushSize: brushSizeInput.value,
+    wandTolerance: wandToleranceInput.value,
+    bgMode: bgMode.value,
+    bgColor: bgColor.value,
+    gradientA: gradientA.value,
+    gradientB: gradientB.value,
+    comparePercent: String(state.comparePercent),
+  };
+  localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+}
+
+function loadUiSettings() {
+  const raw = localStorage.getItem(AUTOSAVE_KEY);
+  if (!raw) return;
+  try {
+    const payload = JSON.parse(raw);
+    if (payload.feather) featherInput.value = payload.feather;
+    if (payload.alphaBoost) alphaBoostInput.value = payload.alphaBoost;
+    if (payload.brushSize) brushSizeInput.value = payload.brushSize;
+    if (payload.wandTolerance) wandToleranceInput.value = payload.wandTolerance;
+    if (payload.bgMode) bgMode.value = payload.bgMode;
+    if (payload.bgColor) bgColor.value = payload.bgColor;
+    if (payload.gradientA) gradientA.value = payload.gradientA;
+    if (payload.gradientB) gradientB.value = payload.gradientB;
+    if (payload.comparePercent) state.comparePercent = Number(payload.comparePercent) || 100;
+  } catch (_) {
+    localStorage.removeItem(AUTOSAVE_KEY);
+  }
 }
 
 function updateTransform() {
@@ -138,6 +190,18 @@ function updateActionButtons() {
   downloadJpgBtn.disabled = !editable;
 }
 
+function renderCompareView() {
+  if (!state.hasOutput) return;
+  const width = compareCanvas.width;
+  const height = compareCanvas.height;
+  const split = Math.round((state.comparePercent / 100) * width);
+
+  compareCtx.clearRect(0, 0, width, height);
+  if (split > 0) {
+    compareCtx.drawImage(originalCanvas, 0, 0, split, height, 0, 0, split, height);
+  }
+}
+
 function canvasPointFromEvent(event) {
   const rect = editCanvas.getBoundingClientRect();
   if (!rect.width || !rect.height) {
@@ -171,6 +235,7 @@ function captureState() {
 
 function applyState(imageData) {
   editCtx.putImageData(imageData, 0, 0);
+  renderCompareView();
   drawOverlay();
 }
 
@@ -205,12 +270,13 @@ function resetEdits() {
   pushUndoState();
   editCtx.clearRect(0, 0, editCanvas.width, editCanvas.height);
   editCtx.drawImage(originalCanvas, 0, 0);
+  renderCompareView();
   clearPolygon();
   drawOverlay();
 }
 
 function prepareCanvasSize(width, height) {
-  [editCanvas, overlayCanvas, originalCanvas, composeCanvas].forEach((canvas) => {
+  [compareCanvas, editCanvas, overlayCanvas, originalCanvas, composeCanvas].forEach((canvas) => {
     canvas.width = width;
     canvas.height = height;
     canvas.style.width = `${width}px`;
@@ -425,7 +491,7 @@ async function getJobStatus(jobId) {
 async function pollJob(jobId, onUpdate) {
   while (true) {
     const status = await getJobStatus(jobId);
-    if (onUpdate) onUpdate(status.status);
+    if (onUpdate) onUpdate(status);
     if (status.status === 'finished') {
       return status;
     }
@@ -462,6 +528,7 @@ async function loadProcessedImage(blob) {
   state.redoStack = [];
   state.polygonPoints = [];
   state.pointerPoint = null;
+  renderCompareView();
   drawOverlay();
   updateActionButtons();
 }
@@ -535,17 +602,20 @@ async function processSingleImage() {
   processBtn.disabled = true;
   reprocessBtn.disabled = true;
   setStatus('Submitting job...');
+  setSingleProgress(0);
 
   try {
     const { job_id: jobId } = await submitSingleJob(state.selectedFile);
-    const status = await pollJob(jobId, (phase) => {
-      setStatus(`Job: ${phase}`);
+    const status = await pollJob(jobId, (jobState) => {
+      setStatus(`Job: ${jobState.status} (${jobState.stage || 'running'})`);
+      setSingleProgress(jobState.progress || 0);
     });
     if (!status.download_path) {
       throw new Error('Result is missing download path');
     }
     const blob = await downloadJobBlob(jobId);
     await loadProcessedImage(blob);
+    setSingleProgress(100);
     setStatus('Done');
   } catch (error) {
     setStatus(error.message || 'Processing failed');
@@ -562,11 +632,13 @@ async function processBatch() {
 
   batchBtn.disabled = true;
   setBatchStatus('Submitting batch job...');
+  setBatchProgress(0);
 
   try {
     const { job_id: jobId } = await submitBatchJob(files);
-    const status = await pollJob(jobId, (phase) => {
-      setBatchStatus(`Batch: ${phase}`);
+    const status = await pollJob(jobId, (jobState) => {
+      setBatchStatus(`Batch: ${jobState.status} (${jobState.stage || 'running'})`);
+      setBatchProgress(jobState.progress || 0);
     });
     if (!status.download_path) {
       throw new Error('Batch result is missing download path');
@@ -580,6 +652,7 @@ async function processBatch() {
     URL.revokeObjectURL(url);
 
     setBatchStatus('Batch complete');
+    setBatchProgress(100);
   } catch (error) {
     setBatchStatus(error.message || 'Batch failed');
   } finally {
@@ -591,6 +664,7 @@ imageInput.addEventListener('change', () => {
   const [file] = imageInput.files;
   state.selectedFile = file || null;
   updateActionButtons();
+  setSingleProgress(0);
   setStatus(state.selectedFile ? 'Ready' : '');
 });
 
@@ -598,15 +672,19 @@ processBtn.addEventListener('click', processSingleImage);
 reprocessBtn.addEventListener('click', processSingleImage);
 
 featherInput.addEventListener('input', updateSliderLabels);
+featherInput.addEventListener('input', saveUiSettings);
 alphaBoostInput.addEventListener('input', updateSliderLabels);
+alphaBoostInput.addEventListener('input', saveUiSettings);
 brushSizeInput.addEventListener('input', () => {
   state.brushSize = Number(brushSizeInput.value);
   updateSliderLabels();
   drawOverlay();
+  saveUiSettings();
 });
 wandToleranceInput.addEventListener('input', () => {
   state.wandTolerance = Number(wandToleranceInput.value);
   updateSliderLabels();
+  saveUiSettings();
 });
 
 undoBtn.addEventListener('click', undo);
@@ -718,6 +796,15 @@ editCanvas.addEventListener('dblclick', () => {
 });
 
 bgMode.addEventListener('change', updateBackgroundControlVisibility);
+bgMode.addEventListener('change', saveUiSettings);
+bgColor.addEventListener('input', saveUiSettings);
+gradientA.addEventListener('input', saveUiSettings);
+gradientB.addEventListener('input', saveUiSettings);
+compareSlider.addEventListener('input', () => {
+  state.comparePercent = Number(compareSlider.value);
+  renderCompareView();
+  saveUiSettings();
+});
 
 bgImageInput.addEventListener('change', () => {
   const [file] = bgImageInput.files || [];
@@ -752,13 +839,44 @@ downloadJpgBtn.addEventListener('click', () => {
 batchInput.addEventListener('change', () => {
   const files = Array.from(batchInput.files || []);
   batchBtn.disabled = files.length === 0;
+  setBatchProgress(0);
   setBatchStatus(files.length ? `${files.length} file(s) selected` : '');
 });
 
 batchBtn.addEventListener('click', processBatch);
 
+window.addEventListener('keydown', (event) => {
+  if (event.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
+  const key = event.key.toLowerCase();
+  if (key === 'b') setTool('brush-erase');
+  if (key === 'e') setTool('brush-restore');
+  if (key === 'w') setTool('wand-erase');
+  if (key === 'p') setTool('polygon-erase');
+  if (key === 'z') undo();
+  if (key === 'y') redo();
+  if (key === ' ') {
+    event.preventDefault();
+    if (!state.spacePanActive) {
+      state.spacePanActive = true;
+      state.previousToolBeforeSpace = state.tool;
+      setTool('pan');
+    }
+  }
+});
+
+window.addEventListener('keyup', (event) => {
+  if (event.key === ' ') {
+    state.spacePanActive = false;
+    setTool(state.previousToolBeforeSpace || 'brush-erase');
+  }
+});
+
+loadUiSettings();
+state.brushSize = Number(brushSizeInput.value);
+state.wandTolerance = Number(wandToleranceInput.value);
 updateSliderLabels();
 updateBackgroundControlVisibility();
 setTool('brush-erase');
+compareSlider.value = String(state.comparePercent);
 updateActionButtons();
 resetView();

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 
 from botocore.client import Config
@@ -48,6 +49,17 @@ class S3ObjectStorage:
         body = response["Body"].read()
         response["Body"].close()
         return body
+
+    def delete_object(self, key: str) -> None:
+        self._client.delete_object(Bucket=self._bucket, Key=key)
+
+    def iter_job_objects(self, prefix: str = "jobs/") -> list[dict[str, datetime | str]]:
+        paginator = self._client.get_paginator("list_objects_v2")
+        items: list[dict[str, datetime | str]] = []
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                items.append({"key": obj["Key"], "last_modified": obj["LastModified"]})
+        return items
 
     def presigned_get_url(self, key: str, ttl_seconds: int) -> str:
         url = self._client.generate_presigned_url(

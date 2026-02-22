@@ -1,23 +1,54 @@
 # Background Remover Studio
 
-Web app for AI background removal with manual editing tools.
+Production-oriented background-removal web app with editor tools, async job queue, and MinIO storage.
 
-## What is implemented now
+## Implemented Scope
 
-- Queue + worker processing with Redis + RQ
-- MinIO (S3-compatible) object storage for output files
-- Job-based API flow: submit -> poll -> download
-- Editor tools: brush erase/restore, wand, polygon, undo/redo, zoom/pan
-- Edge refinement controls: feather + alpha boost
-- Background composer and export
-- Batch processing to ZIP
+1. Job lifecycle management
+- async jobs with status polling
+- cancel API
+- cleanup jobs (manual + scheduler)
+
+2. Progress reporting
+- per-job progress/stage metadata
+- frontend progress bars for single/batch
+
+3. Worker reliability
+- retry policy with backoff
+- failed jobs listing endpoint
+
+4. Storage hardening
+- MinIO/S3 object storage
+- cleanup of expired outputs
+
+5. Validation and security
+- MIME + image bytes verification with Pillow
+- max bytes/max pixels limit
+- request rate limit
+- request-id per API call
+
+6. Testing
+- pytest suite for API, task, and validation logic
+
+7. Observability
+- structured request logging
+- in-app metrics endpoint
+
+8. DX / Operations
+- scripts for storage init and cleanup
+- GitHub Actions CI workflow
+
+9. UI/UX polish
+- before/after compare slider
+- keyboard shortcuts
+- autosave editor settings
 
 ## Architecture
 
-- `web` (FastAPI): validates uploads, enqueues jobs, exposes status/download API
-- `worker` (RQ): runs remove-bg processing and uploads results to MinIO
+- `web` (FastAPI): validate input, enqueue jobs, provide status/download APIs
+- `worker` (RQ): execute remove-bg tasks and cleanup tasks
 - `redis`: queue backend
-- `minio`: object storage backend
+- `minio`: object storage
 
 ## Project Structure
 
@@ -26,33 +57,44 @@ app/
   application/
   domain/
   infrastructure/
+    image_validation.py
     jobs.py
+    metrics.py
     object_storage.py
   presentation/
   tasks/
+scripts/
+  init_storage.py
+  run_cleanup.py
 static/
+tests/
 worker.py
 main.py
 ```
 
 ## Environment
 
-Copy `.env.example` and adjust values:
-
 ```bash
 cp .env.example .env
 ```
 
-Important vars:
+Main variables:
 - `REDIS_URL`
 - `S3_ENDPOINT_URL`
 - `S3_PUBLIC_ENDPOINT_URL`
 - `S3_ACCESS_KEY`
 - `S3_SECRET_KEY`
 - `S3_BUCKET`
-- `SIGNED_URL_TTL_SECONDS`
+- `MAX_IMAGE_BYTES`
+- `MAX_BATCH_FILES`
+- `MAX_IMAGE_PIXELS`
+- `JOB_RETRY_MAX`
+- `JOB_RETRY_INTERVALS`
+- `CLEANUP_ENABLED`
+- `CLEANUP_INTERVAL_SECONDS`
+- `CLEANUP_OLDER_THAN_SECONDS`
 
-## Run with Docker Compose (recommended)
+## Run (Docker Compose)
 
 ```bash
 docker compose up --build
@@ -63,42 +105,51 @@ Services:
 - MinIO API: `http://127.0.0.1:9000`
 - MinIO Console: `http://127.0.0.1:9001`
 
-## Run locally (without Docker)
-
-Start Redis + MinIO first, then:
+## Run (Local)
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python scripts/init_storage.py
 uvicorn main:app --reload
 ```
 
-In another terminal:
+Worker terminal:
 
 ```bash
 source .venv/bin/activate
 python worker.py
 ```
 
-## API (job-based)
+## API
 
 - `POST /api/jobs/remove-bg`
-  - form-data: `file`, `feather_radius`, `alpha_boost`
-  - returns: `{ job_id, status }`
-
 - `POST /api/jobs/remove-bg-batch`
-  - form-data: `files[]`, `feather_radius`, `alpha_boost`
-  - returns: `{ job_id, status }`
-
 - `GET /api/jobs/{job_id}`
-  - returns job state (`queued`, `started`, `finished`, `failed`) and download path when done
-
+- `POST /api/jobs/{job_id}/cancel`
 - `GET /api/jobs/{job_id}/download`
-  - streams file from MinIO via web API
-
+- `GET /api/failed-jobs`
+- `POST /api/admin/cleanup`
+- `GET /api/metrics`
 - `GET /api/health`
 
-## Notes
+## Shortcuts
 
-- `Auth + Quota` is intentionally not included yet.
+- `B` brush erase
+- `E` brush restore
+- `W` wand erase
+- `P` polygon erase
+- `Z` undo
+- `Y` redo
+- `Space` hold pan
+
+## Tests
+
+```bash
+python3 -m pytest -q
+```
+
+## CI
+
+GitHub Actions workflow: `.github/workflows/ci.yml`
